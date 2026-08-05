@@ -1,0 +1,52 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  schemas  = ["app"]
+}
+
+enum MessageRole {
+  USER      @map("user")
+  ASSISTANT @map("assistant")
+
+  @@schema("app")
+}
+
+enum JobMode {
+  ASK  @map("ask")
+  TASK @map("task")
+
+  @@schema("app")
+}
+
+model Conversation {
+  id             String    @id @default(uuid()) @db.Uuid
+  title          String    @db.VarChar(120)
+  repositoryPath String    @map("repository_path")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  messages       Message[]
+
+  @@index([updatedAt], map: "conversations_updated_at_idx")
+  @@map("conversations")
+  @@schema("app")
+}
+
+model Message {
+  id             String       @id @default(uuid()) @db.Uuid
+  conversationId String       @map("conversation_id") @db.Uuid
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           MessageRole
+  mode           JobMode
+  content        String
+  jobId          String?      @map("job_id") @db.Uuid
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([conversationId, createdAt], map: "messages_conversation_created_at_idx")
+  @@index([jobId], map: "messages_job_id_idx")
+  @@map("messages")
+  @@schema("app")
+}

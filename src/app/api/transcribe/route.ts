@@ -18,12 +18,25 @@ interface TranscriptionResult {
   duration?: number;
 }
 
-const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
-const TRANSCRIPTION_TIMEOUT_MS = 180_000;
-const MAX_PROCESS_OUTPUT = 2 * 1024 * 1024;
+interface WhisperConfiguration {
+  pythonPath: string;
+  scriptPath: string;
+}
 
-function getAudioExtension(mimeType: string): string {
-  const normalizedType = mimeType.toLowerCase();
+const MAX_AUDIO_BYTES =
+  25 * 1024 * 1024;
+
+const TRANSCRIPTION_TIMEOUT_MS =
+  180_000;
+
+const MAX_PROCESS_OUTPUT =
+  2 * 1024 * 1024;
+
+function getAudioExtension(
+  mimeType: string,
+): string {
+  const normalizedType =
+    mimeType.toLowerCase();
 
   if (normalizedType.includes("mp4")) {
     return "m4a";
@@ -40,38 +53,78 @@ function getAudioExtension(mimeType: string): string {
   return "webm";
 }
 
+function getWhisperConfiguration():
+  WhisperConfiguration {
+  const pythonPath =
+    process.env.JARVIS_WHISPER_PYTHON?.trim();
+
+  if (!pythonPath) {
+    throw new Error(
+      "JARVIS_WHISPER_PYTHON is not configured.",
+    );
+  }
+
+  if (!path.isAbsolute(pythonPath)) {
+    throw new Error(
+      "JARVIS_WHISPER_PYTHON must be an absolute path.",
+    );
+  }
+
+  const configuredScript =
+    process.env.JARVIS_WHISPER_SCRIPT?.trim();
+
+  const scriptPath = configuredScript
+    ? path.resolve(configuredScript)
+    : path.join(
+        process.cwd(),
+        "scripts",
+        "transcribe.py",
+      );
+
+  return {
+    pythonPath,
+    scriptPath,
+  };
+}
+
 function runTranscription(
   audioPath: string,
+  configuration: WhisperConfiguration,
 ): Promise<TranscriptionResult> {
-  const python =
-    process.env.JARVIS_WHISPER_PYTHON ??
-    path.join(
-      process.cwd(),
-      ".venv-whisper",
-      "bin",
-      "python",
-    );
-
-  const script =
-    process.env.JARVIS_WHISPER_SCRIPT ??
-    path.join(process.cwd(), "scripts", "transcribe.py");
+  const {
+    pythonPath,
+    scriptPath,
+  } = configuration;
 
   return new Promise((resolve, reject) => {
-    const child = spawn(python, [script, audioPath], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        PYTHONUNBUFFERED: "1",
+    const child = spawn(
+      pythonPath,
+      [
+        scriptPath,
+        audioPath,
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: "1",
+        },
+        stdio: [
+          "ignore",
+          "pipe",
+          "pipe",
+        ],
+        shell: false,
       },
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: false,
-    });
+    );
 
     let stdout = "";
     let stderr = "";
     let settled = false;
 
-    const finishWithError = (message: string): void => {
+    const finishWithError = (
+      message: string,
+    ): void => {
       if (settled) {
         return;
       }
@@ -88,22 +141,39 @@ function runTranscription(
       );
     }, TRANSCRIPTION_TIMEOUT_MS);
 
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
+    child.stdout.on(
+      "data",
+      (chunk: Buffer) => {
+        stdout += chunk.toString();
 
-      if (stdout.length > MAX_PROCESS_OUTPUT) {
-        child.kill("SIGKILL");
-        finishWithError("Transcription output was unexpectedly large.");
-      }
-    });
+        if (
+          stdout.length >
+          MAX_PROCESS_OUTPUT
+        ) {
+          child.kill("SIGKILL");
 
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
+          finishWithError(
+            "Transcription output was unexpectedly large.",
+          );
+        }
+      },
+    );
 
-      if (stderr.length > MAX_PROCESS_OUTPUT) {
-        stderr = stderr.slice(-MAX_PROCESS_OUTPUT);
-      }
-    });
+    child.stderr.on(
+      "data",
+      (chunk: Buffer) => {
+        stderr += chunk.toString();
+
+        if (
+          stderr.length >
+          MAX_PROCESS_OUTPUT
+        ) {
+          stderr = stderr.slice(
+            -MAX_PROCESS_OUTPUT,
+          );
+        }
+      },
+    );
 
     child.on("error", (error) => {
       clearTimeout(timeout);
@@ -120,8 +190,11 @@ function runTranscription(
       if (exitCode !== 0) {
         finishWithError(
           stderr.trim() ||
-            `Whisper exited with code ${String(exitCode)}.`,
+            `Whisper exited with code ${String(
+              exitCode,
+            )}.`,
         );
+
         return;
       }
 
@@ -130,10 +203,14 @@ function runTranscription(
           stdout.trim(),
         ) as TranscriptionResult;
 
-        if (typeof result.text !== "string") {
+        if (
+          typeof result.text !==
+          "string"
+        ) {
           finishWithError(
             "Whisper returned an invalid transcription result.",
           );
+
           return;
         }
 
@@ -141,7 +218,10 @@ function runTranscription(
         resolve(result);
       } catch {
         finishWithError(
-          `Unable to parse Whisper output: ${stdout.slice(0, 500)}`,
+          `Unable to parse Whisper output: ${stdout.slice(
+            0,
+            500,
+          )}`,
         );
       }
     });
@@ -151,16 +231,30 @@ function runTranscription(
 export async function POST(
   request: Request,
 ): Promise<Response> {
-  let temporaryDirectory: string | undefined;
+  let temporaryDirectory:
+    | string
+    | undefined;
 
   try {
-    const formData = await request.formData();
-    const audio = formData.get("audio");
+    const configuration =
+      getWhisperConfiguration();
+
+    await Promise.all([
+      access(configuration.pythonPath),
+      access(configuration.scriptPath),
+    ]);
+
+    const formData =
+      await request.formData();
+
+    const audio =
+      formData.get("audio");
 
     if (!(audio instanceof File)) {
       return Response.json(
         {
-          error: "An audio file is required.",
+          error:
+            "An audio file is required.",
         },
         {
           status: 400,
@@ -171,7 +265,8 @@ export async function POST(
     if (audio.size === 0) {
       return Response.json(
         {
-          error: "The audio recording is empty.",
+          error:
+            "The audio recording is empty.",
         },
         {
           status: 400,
@@ -179,10 +274,14 @@ export async function POST(
       );
     }
 
-    if (audio.size > MAX_AUDIO_BYTES) {
+    if (
+      audio.size >
+      MAX_AUDIO_BYTES
+    ) {
       return Response.json(
         {
-          error: "The recording is too large.",
+          error:
+            "The recording is too large.",
         },
         {
           status: 413,
@@ -190,43 +289,46 @@ export async function POST(
       );
     }
 
-    const python =
-      process.env.JARVIS_WHISPER_PYTHON ??
-      path.join(
-        process.cwd(),
-        ".venv-whisper",
-        "bin",
-        "python",
+    temporaryDirectory =
+      await mkdtemp(
+        path.join(
+          os.tmpdir(),
+          "jarvis-voice-",
+        ),
       );
 
-    const script =
-      process.env.JARVIS_WHISPER_SCRIPT ??
-      path.join(process.cwd(), "scripts", "transcribe.py");
+    const extension =
+      getAudioExtension(audio.type);
 
-    await Promise.all([access(python), access(script)]);
+    const audioPath =
+      path.join(
+        temporaryDirectory,
+        `recording.${extension}`,
+      );
 
-    temporaryDirectory = await mkdtemp(
-      path.join(os.tmpdir(), "jarvis-voice-"),
+    const audioBuffer =
+      Buffer.from(
+        await audio.arrayBuffer(),
+      );
+
+    await writeFile(
+      audioPath,
+      audioBuffer,
     );
 
-    const extension = getAudioExtension(audio.type);
-    const audioPath = path.join(
-      temporaryDirectory,
-      `recording.${extension}`,
-    );
+    const transcription =
+      await runTranscription(
+        audioPath,
+        configuration,
+      );
 
-    const audioBuffer = Buffer.from(
-      await audio.arrayBuffer(),
-    );
-
-    await writeFile(audioPath, audioBuffer);
-
-    const transcription = await runTranscription(audioPath);
-
-    if (!transcription.text.trim()) {
+    if (
+      !transcription.text.trim()
+    ) {
       return Response.json(
         {
-          error: "No speech was detected.",
+          error:
+            "No speech was detected.",
         },
         {
           status: 422,
@@ -234,12 +336,21 @@ export async function POST(
       );
     }
 
-    return Response.json(transcription, {
-      headers: {
-        "Cache-Control": "no-store",
+    return Response.json(
+      transcription,
+      {
+        headers: {
+          "Cache-Control":
+            "no-store",
+        },
       },
-    });
-  } catch (error) {
+    );
+  } catch (error: unknown) {
+    console.error(
+      "Voice transcription failed:",
+      error,
+    );
+
     return Response.json(
       {
         error:
@@ -253,10 +364,13 @@ export async function POST(
     );
   } finally {
     if (temporaryDirectory) {
-      await rm(temporaryDirectory, {
-        recursive: true,
-        force: true,
-      }).catch(() => undefined);
+      await rm(
+        temporaryDirectory,
+        {
+          recursive: true,
+          force: true,
+        },
+      ).catch(() => undefined);
     }
   }
 }

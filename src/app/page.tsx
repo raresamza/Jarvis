@@ -8,6 +8,8 @@ import {
 } from "react";
 
 import { RepositoryPicker } from "@/components/RepositoryPicker";
+import { JarvisSpeechControls } from "@/components/JarvisSpeechControls";
+import { useJarvisSpeech } from "@/hooks/useJarvisSpeech";
 
 import {
   VoiceTaskInput,
@@ -44,6 +46,107 @@ const terminalStates: JobState[] = [
   "cancelled",
 ];
 
+function prepareJarvisSpeech(
+  job: JarvisJob,
+): string {
+  if (job.status === "failed") {
+    return (
+      "The request failed. " +
+      "Please check the activity log."
+    );
+  }
+
+  if (job.mode === "task") {
+    return (
+      "The delegated task has completed. " +
+      "The result and validation details " +
+      "are displayed on screen."
+    );
+  }
+
+  const log = job.log ?? "";
+
+  const ignoredLinePatterns = [
+    /^\[.*\]$/,
+    /^Mode:/i,
+    /^Repository:/i,
+    /^Model:/i,
+    /^Question:/i,
+    /^Request:/i,
+    /^Run files:/i,
+    /^Output:/i,
+    /^Events:/i,
+    /^Debug:/i,
+    /^Ask Jarvis finished/i,
+    /^Task execution finished/i,
+    /^Job (completed|failed)/i,
+  ];
+
+  const cleaned = log
+    /*
+     * Do not read source-code blocks aloud.
+     */
+    .replace(
+      /```[\s\S]*?```/g,
+      " Code block omitted. ",
+    )
+    .split(/\r?\n/)
+    .filter((line) => {
+      const trimmed = line.trim();
+
+      if (!trimmed) {
+        return true;
+      }
+
+      return !ignoredLinePatterns.some(
+        (pattern) =>
+          pattern.test(trimmed),
+      );
+    })
+    .join(" ")
+    .replace(
+      /\[([^\]]+)\]\([^)]+\)/g,
+      "$1",
+    )
+    .replace(
+      /^#{1,6}\s+/gm,
+      "",
+    )
+    .replace(
+      /[*_`>#]/g,
+      "",
+    )
+    .replace(
+      /\s+/g,
+      " ",
+    )
+    .trim();
+
+  if (!cleaned) {
+    return (
+      "I have completed the request. " +
+      "The answer is displayed on screen."
+    );
+  }
+
+  const maximumCharacters = 1800;
+
+  if (
+    cleaned.length >
+    maximumCharacters
+  ) {
+    return (
+      `${cleaned.slice(
+        0,
+        maximumCharacters,
+      )}. ` +
+      "The full answer is displayed on screen."
+    );
+  }
+
+  return cleaned;
+}
+
 export default function Home() {
   const [repository, setRepository] =
     useState(
@@ -67,6 +170,21 @@ export default function Home() {
   const logContainer =
     useRef<HTMLPreElement>(null);
 
+  const lastSpokenJobId =
+    useRef<string | null>(null);
+
+  const {
+    supported: speechSupported,
+    enabled: speechEnabled,
+    speaking,
+    voices,
+    voiceName,
+    setEnabled: setSpeechEnabled,
+    setVoiceName,
+    speak,
+    stop: stopSpeaking,
+  } = useJarvisSpeech();
+
   const isBusy =
     startingMode !== null ||
     job?.status === "running" ||
@@ -84,8 +202,8 @@ export default function Home() {
 
     const result =
       (await response.json()) as
-        | JarvisJob
-        | { error: string };
+      | JarvisJob
+      | { error: string };
 
     if (
       !response.ok ||
@@ -141,6 +259,32 @@ export default function Home() {
       logContainer.current.scrollHeight;
   }, [job?.log]);
 
+  useEffect(() => {
+    if (
+      !job ||
+      !terminalStates.includes(
+        job.status,
+      ) ||
+      lastSpokenJobId.current ===
+      job.id
+    ) {
+      return;
+    }
+
+    lastSpokenJobId.current =
+      job.id;
+
+    speak(
+      prepareJarvisSpeech(job),
+    );
+  }, [
+    job?.id,
+    job?.status,
+    job?.mode,
+    job?.log,
+    speak,
+  ]);
+
   const submitRequest = async (
     mode: JobMode,
     taskOverride?: string,
@@ -157,6 +301,7 @@ export default function Home() {
       return;
     }
 
+    stopSpeaking();
     setStartingMode(mode);
     setError("");
     setJob(null);
@@ -181,8 +326,8 @@ export default function Home() {
 
       const result =
         (await response.json()) as
-          | JarvisJob
-          | { error: string };
+        | JarvisJob
+        | { error: string };
 
       if (
         !response.ok ||
@@ -258,6 +403,23 @@ export default function Home() {
             </p>
           </div>
 
+          <div className="mb-5">
+            <JarvisSpeechControls
+              supported={speechSupported}
+              enabled={speechEnabled}
+              speaking={speaking}
+              voices={voices}
+              voiceName={voiceName}
+              onEnabledChange={
+                setSpeechEnabled
+              }
+              onVoiceChange={
+                setVoiceName
+              }
+              onStop={stopSpeaking}
+            />
+          </div>
+
           <form
             className="space-y-5"
             onSubmit={submitAsQuestion}
@@ -286,8 +448,8 @@ export default function Home() {
                 {startingMode === "ask"
                   ? "Starting..."
                   : job?.status ===
-                        "running" &&
-                      job.mode === "ask"
+                    "running" &&
+                    job.mode === "ask"
                     ? "Answering..."
                     : "Ask Jarvis"}
               </button>
@@ -305,8 +467,8 @@ export default function Home() {
                 {startingMode === "task"
                   ? "Starting..."
                   : job?.status ===
-                        "running" &&
-                      job.mode === "task"
+                    "running" &&
+                    job.mode === "task"
                     ? "Working..."
                     : "Delegate task"}
               </button>
@@ -337,21 +499,20 @@ export default function Home() {
 
               <div className="flex shrink-0 items-center gap-2 rounded-full border border-zinc-700 px-3 py-1.5 text-sm">
                 <span
-                  className={`h-2.5 w-2.5 rounded-full ${
-                    job?.status ===
+                  className={`h-2.5 w-2.5 rounded-full ${job?.status ===
                     "completed"
-                      ? "bg-emerald-400"
+                    ? "bg-emerald-400"
+                    : job?.status ===
+                      "failed"
+                      ? "bg-red-400"
                       : job?.status ===
-                          "failed"
-                        ? "bg-red-400"
+                        "running"
+                        ? "animate-pulse bg-sky-400"
                         : job?.status ===
-                            "running"
-                          ? "animate-pulse bg-sky-400"
-                          : job?.status ===
-                              "queued"
-                            ? "animate-pulse bg-amber-400"
-                            : "bg-zinc-500"
-                  }`}
+                          "queued"
+                          ? "animate-pulse bg-amber-400"
+                          : "bg-zinc-500"
+                    }`}
                 />
 
                 {statusLabel}
@@ -405,8 +566,8 @@ export default function Home() {
                   <span>
                     {job.startedAt
                       ? new Date(
-                          job.startedAt,
-                        ).toLocaleTimeString()
+                        job.startedAt,
+                      ).toLocaleTimeString()
                       : "Pending"}
                   </span>
                 </div>
