@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ASK_MODEL="${JARVIS_ASK_MODEL:-glm-4.7-flash}"
+
+STREAM_PARSER="${JARVIS_STREAM_PARSER:-$HOME/projects/jarvis/scripts/claude_stream.py}"
+
+TIMEOUT_MS="${API_TIMEOUT_MS:-36000000}"
+
+if [[ $# -eq 0 ]]; then
+  echo 'Usage: jarvis-ask "Ask a question about this repository"'
+  exit 1
+fi
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "Error: Claude Code is not available in PATH."
+  exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Error: Python 3 is not available."
+  exit 1
+fi
+
+if [[ ! -f "$STREAM_PARSER" ]]; then
+  echo "Error: stream parser not found:"
+  echo "$STREAM_PARSER"
+  exit 1
+fi
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "Error: jarvis-ask must run inside a Git repository."
+  exit 1
+fi
+
+REPOSITORY_ROOT="$(git rev-parse --show-toplevel)"
+QUESTION="$*"
+
+RUN_ID="$(date +%Y%m%d-%H%M%S)"
+RUN_DIR="$HOME/.local/share/jarvis/ask-runs/$RUN_ID"
+
+PROMPT_FILE="$RUN_DIR/prompt.md"
+EVENT_LOG="$RUN_DIR/claude-events.jsonl"
+OUTPUT_LOG="$RUN_DIR/output.log"
+DEBUG_LOG="$RUN_DIR/claude-debug.log"
+
+mkdir -p "$RUN_DIR"
+
+cat > "$PROMPT_FILE" <<PROMPT
+You are Jarvis, a fast read-only repository assistant.
+
+The current working directory is the selected repository.
+
+Answer this question:
+
+$QUESTION
+
+Rules:
+
+- Inspect the repository only as much as necessary.
+- Answer the question directly.
+- Use Read, Glob, and Grep when repository inspection is needed.
+- Do not create, edit, move, rename, or delete files.
+- Do not execute shell commands.
+- Do not create temporary reports.
+- Do not produce an implementation plan.
+- Do not suggest a large architecture unless the question requires it.
+- When identifying a file, include its repository-relative path.
+- Clearly distinguish facts observed in the repository from inference.
+- If the available files do not support a confident answer, say what is missing.
+- Keep the final answer concise unless the question asks for detail.
+PROMPT
+
+echo
+echo "Mode: Ask Jarvis"
+echo "Repository: $REPOSITORY_ROOT"
+echo "Model: $ASK_MODEL"
+echo "Question: $QUESTION"
+echo
+
+cd "$REPOSITORY_ROOT"
+
+API_TIMEOUT_MS="$TIMEOUT_MS" \
+CLAUDE_STREAM_IDLE_TIMEOUT_MS="$TIMEOUT_MS" \
+CLAUDE_CODE_DISABLE_THINKING="1" \
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1" \
+CLAUDE_CODE_MAX_RETRIES="1" \
+claude \
+  --bare \
+  --model "$ASK_MODEL" \
+  --permission-mode dontAsk \
+  --tools "Read,Glob,Grep" \
+  --max-turns 8 \
+  --no-session-persistence \
+  --no-chrome \
+  --debug-file "$DEBUG_LOG" \
+  --output-format stream-json \
+  --verbose \
+  --include-partial-messages \
+  -p "$(cat "$PROMPT_FILE")" |
+tee "$EVENT_LOG" |
+python3 "$STREAM_PARSER" |
+tee "$OUTPUT_LOG"
+
+echo
+echo
+echo "Ask Jarvis finished."
+echo
+echo "Run files:"
+echo "  Output: $OUTPUT_LOG"
+echo "  Events: $EVENT_LOG"
+echo "  Debug:  $DEBUG_LOG"
