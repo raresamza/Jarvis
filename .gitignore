@@ -48,3 +48,7 @@ node_modules/
 
 # Generated Prisma Client
 /src/generated/prisma/
+
+# Python cache
+__pycache__/
+*.py[cod]
