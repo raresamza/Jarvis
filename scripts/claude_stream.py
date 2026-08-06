@@ -1,17 +1,59 @@
 #!/usr/bin/env python3
 
+import argparse
 import json
+import os
+import tempfile
 import sys
+from pathlib import Path
 from typing import Any
 
 
-tool_names: dict[str, str] = {}
-saw_text_delta = False
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Render Claude Code stream-json as readable activity output."
+    )
+    parser.add_argument(
+        "--final-output",
+        help="Optional path where the final result text is written atomically.",
+    )
+    return parser.parse_args()
 
 
 def output(text: str, *, end: str = "\n") -> None:
     print(text, end=end, flush=True)
 
+
+def write_final_output(file_path: str, text: str) -> None:
+    destination = Path(file_path).expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+        text=True,
+    )
+
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text.strip())
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temporary_name, destination)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+arguments = parse_arguments()
+tool_names: dict[str, str] = {}
+saw_text_delta = False
 
 for raw_line in sys.stdin:
     line = raw_line.strip()
@@ -106,12 +148,15 @@ for raw_line in sys.stdin:
     elif message_type == "result":
         result_text = message.get("result")
 
-        if (
-            not saw_text_delta
-            and isinstance(result_text, str)
-            and result_text.strip()
-        ):
-            output(result_text)
+        if isinstance(result_text, str) and result_text.strip():
+            if arguments.final_output:
+                write_final_output(
+                    arguments.final_output,
+                    result_text,
+                )
+
+            if not saw_text_delta:
+                output(result_text)
 
         subtype = message.get("subtype", "completed")
         is_error = message.get("is_error", False)
