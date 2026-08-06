@@ -3,12 +3,25 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
 
+import {
+  markdownToSpeechText,
+  splitSpeechText,
+} from "@/lib/ttsText";
+
+export type JarvisSpeechEngine =
+  | "local"
+  | "browser";
+
 const ENABLED_STORAGE_KEY =
   "jarvis:speech-enabled";
+
+const ENGINE_STORAGE_KEY =
+  "jarvis:speech-engine";
 
 const VOICE_STORAGE_KEY =
   "jarvis:speech-voice";
@@ -30,13 +43,23 @@ function subscribeToSpeechSupport(): () => void {
 function getSpeechSupportSnapshot(): boolean {
   return (
     typeof window !== "undefined" &&
-    "speechSynthesis" in window &&
-    "SpeechSynthesisUtterance" in window
+    ("Audio" in window ||
+      ("speechSynthesis" in window &&
+        "SpeechSynthesisUtterance" in
+          window))
   );
 }
 
 function getSpeechSupportServerSnapshot(): boolean {
   return false;
+}
+
+function hasBrowserSpeechSupport(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    "speechSynthesis" in window &&
+    "SpeechSynthesisUtterance" in window
+  );
 }
 
 function chooseDefaultVoice(
@@ -75,6 +98,12 @@ function chooseDefaultVoice(
   );
 }
 
+function isSpeechEngine(
+  value: string | null,
+): value is JarvisSpeechEngine {
+  return value === "local" || value === "browser";
+}
+
 export function useJarvisSpeech() {
   const supported = useSyncExternalStore(
     subscribeToSpeechSupport,
@@ -85,8 +114,14 @@ export function useJarvisSpeech() {
   const [enabled, setEnabledState] =
     useState(true);
 
+  const [engine, setEngineState] =
+    useState<JarvisSpeechEngine>("local");
+
   const [speaking, setSpeaking] =
     useState(false);
+
+  const [speechError, setSpeechError] =
+    useState("");
 
   const [voices, setVoices] = useState<
     SpeechSynthesisVoice[]
@@ -94,6 +129,40 @@ export function useJarvisSpeech() {
 
   const [voiceName, setVoiceNameState] =
     useState("");
+
+  const audioRef =
+    useRef<HTMLAudioElement | null>(null);
+
+  const audioUrlRef = useRef<string | null>(null);
+
+  const requestControllerRef =
+    useRef<AbortController | null>(null);
+
+  const releaseLocalAudio = useCallback((): void => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+      audioRef.current = null;
+    }
+
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+  }, []);
+
+  const stop = useCallback((): void => {
+    requestControllerRef.current?.abort();
+    requestControllerRef.current = null;
+
+    releaseLocalAudio();
+
+    if (hasBrowserSpeechSupport()) {
+      window.speechSynthesis.cancel();
+    }
+
+    setSpeaking(false);
+  }, [releaseLocalAudio]);
 
   useEffect(() => {
     if (!supported) {
@@ -107,13 +176,21 @@ export function useJarvisSpeech() {
         ENABLED_STORAGE_KEY,
       );
 
+    const storedEngine =
+      window.localStorage.getItem(
+        ENGINE_STORAGE_KEY,
+      );
+
     const storedVoice =
       window.localStorage.getItem(
         VOICE_STORAGE_KEY,
       );
 
     const loadVoices = (): void => {
-      if (cancelled) {
+      if (
+        cancelled ||
+        !hasBrowserSpeechSupport()
+      ) {
         return;
       }
 
@@ -122,9 +199,7 @@ export function useJarvisSpeech() {
           .getVoices()
           .slice()
           .sort((left, right) =>
-            left.name.localeCompare(
-              right.name,
-            ),
+            left.name.localeCompare(right.name),
           );
 
       setVoices(availableVoices);
@@ -132,8 +207,7 @@ export function useJarvisSpeech() {
       if (
         storedVoice &&
         availableVoices.some(
-          (voice) =>
-            voice.name === storedVoice,
+          (voice) => voice.name === storedVoice,
         )
       ) {
         setVoiceNameState(storedVoice);
@@ -141,21 +215,13 @@ export function useJarvisSpeech() {
       }
 
       const defaultVoice =
-        chooseDefaultVoice(
-          availableVoices,
-        );
+        chooseDefaultVoice(availableVoices);
 
       if (defaultVoice) {
-        setVoiceNameState(
-          defaultVoice.name,
-        );
+        setVoiceNameState(defaultVoice.name);
       }
     };
 
-    /*
-     * Run initial state synchronization outside
-     * the immediate effect body.
-     */
     queueMicrotask(() => {
       if (cancelled) {
         return;
@@ -167,35 +233,34 @@ export function useJarvisSpeech() {
         );
       }
 
+      if (isSpeechEngine(storedEngine)) {
+        setEngineState(storedEngine);
+      }
+
       loadVoices();
     });
 
-    window.speechSynthesis.addEventListener(
-      "voiceschanged",
-      loadVoices,
-    );
+    if (hasBrowserSpeechSupport()) {
+      window.speechSynthesis.addEventListener(
+        "voiceschanged",
+        loadVoices,
+      );
+    }
 
     return () => {
       cancelled = true;
 
-      window.speechSynthesis.removeEventListener(
-        "voiceschanged",
-        loadVoices,
-      );
+      if (hasBrowserSpeechSupport()) {
+        window.speechSynthesis.removeEventListener(
+          "voiceschanged",
+          loadVoices,
+        );
+      }
+
+      requestControllerRef.current?.abort();
+      releaseLocalAudio();
     };
-  }, [supported]);
-
-  const stop = useCallback((): void => {
-    if (
-      typeof window === "undefined" ||
-      !("speechSynthesis" in window)
-    ) {
-      return;
-    }
-
-    window.speechSynthesis.cancel();
-    setSpeaking(false);
-  }, []);
+  }, [releaseLocalAudio, supported]);
 
   const setEnabled = useCallback(
     (nextEnabled: boolean): void => {
@@ -215,6 +280,22 @@ export function useJarvisSpeech() {
     [stop],
   );
 
+  const setEngine = useCallback(
+    (nextEngine: JarvisSpeechEngine): void => {
+      stop();
+      setEngineState(nextEngine);
+      setSpeechError("");
+
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(
+          ENGINE_STORAGE_KEY,
+          nextEngine,
+        );
+      }
+    },
+    [stop],
+  );
+
   const setVoiceName = useCallback(
     (nextVoiceName: string): void => {
       setVoiceNameState(nextVoiceName);
@@ -229,39 +310,25 @@ export function useJarvisSpeech() {
     [],
   );
 
-  const speak = useCallback(
-    (text: string): void => {
-      const normalizedText =
-        text.trim();
-
-      if (
-        !enabled ||
-        !supported ||
-        !normalizedText
-      ) {
-        return;
+  const speakWithBrowser = useCallback(
+    (text: string): boolean => {
+      if (!hasBrowserSpeechSupport()) {
+        return false;
       }
 
       window.speechSynthesis.cancel();
 
       const utterance =
-        new SpeechSynthesisUtterance(
-          normalizedText,
-        );
+        new SpeechSynthesisUtterance(text);
 
       const selectedVoice =
         voices.find(
-          (voice) =>
-            voice.name === voiceName,
-        ) ??
-        chooseDefaultVoice(voices);
+          (voice) => voice.name === voiceName,
+        ) ?? chooseDefaultVoice(voices);
 
       if (selectedVoice) {
-        utterance.voice =
-          selectedVoice;
-
-        utterance.lang =
-          selectedVoice.lang;
+        utterance.voice = selectedVoice;
+        utterance.lang = selectedVoice.lang;
       } else {
         utterance.lang = "en-US";
       }
@@ -270,46 +337,237 @@ export function useJarvisSpeech() {
       utterance.pitch = 0.88;
       utterance.volume = 1;
 
-      utterance.addEventListener(
-        "start",
-        () => {
-          setSpeaking(true);
-        },
-      );
+      utterance.addEventListener("start", () => {
+        setSpeaking(true);
+      });
 
-      utterance.addEventListener(
-        "end",
-        () => {
-          setSpeaking(false);
-        },
-      );
+      utterance.addEventListener("end", () => {
+        setSpeaking(false);
+      });
 
-      utterance.addEventListener(
-        "error",
-        () => {
-          setSpeaking(false);
-        },
-      );
+      utterance.addEventListener("error", () => {
+        setSpeaking(false);
+      });
 
-      window.speechSynthesis.speak(
-        utterance,
-      );
+      window.speechSynthesis.speak(utterance);
+      return true;
+    },
+    [voiceName, voices],
+  );
+
+  const playAudioBlob = useCallback(
+    async (
+      blob: Blob,
+      signal: AbortSignal,
+    ): Promise<void> => {
+      releaseLocalAudio();
+
+      const audioUrl = URL.createObjectURL(blob);
+      const audio = new Audio(audioUrl);
+
+      audioUrlRef.current = audioUrl;
+      audioRef.current = audio;
+
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = (): void => {
+          signal.removeEventListener(
+            "abort",
+            handleAbort,
+          );
+        };
+
+        const finish = (): void => {
+          cleanup();
+          releaseLocalAudio();
+          resolve();
+        };
+
+        const handleAbort = (): void => {
+          cleanup();
+          releaseLocalAudio();
+          reject(
+            new DOMException(
+              "Speech was stopped.",
+              "AbortError",
+            ),
+          );
+        };
+
+        audio.addEventListener("ended", finish, {
+          once: true,
+        });
+
+        audio.addEventListener(
+          "error",
+          () => {
+            cleanup();
+            releaseLocalAudio();
+            reject(
+              new Error(
+                "The generated audio could not be played.",
+              ),
+            );
+          },
+          { once: true },
+        );
+
+        signal.addEventListener(
+          "abort",
+          handleAbort,
+          { once: true },
+        );
+
+        void audio.play().catch((error: unknown) => {
+          cleanup();
+          releaseLocalAudio();
+          reject(error);
+        });
+      });
+    },
+    [releaseLocalAudio],
+  );
+
+  const speak = useCallback(
+    (markdown: string): void => {
+      const speechText =
+        markdownToSpeechText(markdown);
+
+      if (
+        !enabled ||
+        !supported ||
+        !speechText
+      ) {
+        return;
+      }
+
+      stop();
+      setSpeechError("");
+
+      if (engine === "browser") {
+        speakWithBrowser(speechText);
+        return;
+      }
+
+      const segments = splitSpeechText(speechText);
+
+      if (segments.length === 0) {
+        return;
+      }
+
+      const controller = new AbortController();
+      requestControllerRef.current = controller;
+      setSpeaking(true);
+
+      void (async () => {
+        let segmentIndex = 0;
+
+        try {
+          for (
+            segmentIndex = 0;
+            segmentIndex < segments.length;
+            segmentIndex += 1
+          ) {
+            const response = await fetch("/api/tts", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                text: segments[segmentIndex],
+              }),
+              signal: controller.signal,
+            });
+
+            if (!response.ok) {
+              let message =
+                "Local neural voice is unavailable.";
+
+              try {
+                const payload =
+                  (await response.json()) as {
+                    error?: unknown;
+                  };
+
+                if (
+                  typeof payload.error === "string"
+                ) {
+                  message = payload.error;
+                }
+              } catch {
+                // Keep the fallback message.
+              }
+
+              throw new Error(message);
+            }
+
+            const blob = await response.blob();
+
+            if (controller.signal.aborted) {
+              return;
+            }
+
+            await playAudioBlob(
+              blob,
+              controller.signal,
+            );
+          }
+        } catch (error) {
+          if (controller.signal.aborted) {
+            return;
+          }
+
+          releaseLocalAudio();
+
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Local neural voice is unavailable.";
+
+          const remainingText = segments
+            .slice(segmentIndex)
+            .join(" ");
+
+          const usedFallback =
+            Boolean(remainingText) &&
+            speakWithBrowser(remainingText);
+
+          setSpeechError(
+            usedFallback
+              ? `${message} Using the browser voice for the remaining text.`
+              : message,
+          );
+        } finally {
+          if (
+            requestControllerRef.current ===
+            controller
+          ) {
+            requestControllerRef.current = null;
+            setSpeaking(false);
+          }
+        }
+      })();
     },
     [
       enabled,
+      engine,
+      playAudioBlob,
+      releaseLocalAudio,
+      speakWithBrowser,
+      stop,
       supported,
-      voiceName,
-      voices,
     ],
   );
 
   return {
     supported,
     enabled,
+    engine,
     speaking,
+    speechError,
     voices,
     voiceName,
     setEnabled,
+    setEngine,
     setVoiceName,
     speak,
     stop,

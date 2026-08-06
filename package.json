@@ -15,7 +15,9 @@
     "db:validate": "prisma validate",
     "postinstall": "prisma generate",
     "db:push": "prisma db push",
-    "db:format": "prisma format"
+    "db:format": "prisma format",
+    "dev:jarvis": "bash scripts/dev-with-tts.sh",
+    "tts": "bin/jarvis-tts --preload"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.9.1",
@@ -25,6 +27,8 @@
     "pg": "^8.22.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "server-only": "^0.0.1"
   },
   "devDependencies": {

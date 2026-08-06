@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if [[ -f "$PROJECT_ROOT/.env.local" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$PROJECT_ROOT/.env.local"
+  set +a
+fi
+
+DEFAULT_PYTHON="$HOME/.local/share/jarvis/venvs/tts/bin/python"
+PYTHON_BIN="${JARVIS_TTS_PYTHON:-$DEFAULT_PYTHON}"
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  cat >&2 <<EOF
+Jarvis TTS Python environment was not found:
+  $PYTHON_BIN
+
+Create the TTS environment first, then run this command again.
+EOF
+  exit 1
+fi
+
+exec "$PYTHON_BIN" \
+  "$PROJECT_ROOT/scripts/tts_server.py" \
+  --host "${JARVIS_TTS_HOST:-127.0.0.1}" \
+  --port "${JARVIS_TTS_PORT:-8765}" \
+  "$@"

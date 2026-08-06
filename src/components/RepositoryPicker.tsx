@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
   useMemo,
   useState,
@@ -102,7 +103,7 @@ export function RepositoryPicker({
   const [browserError, setBrowserError] =
     useState("");
 
-  const loadDirectory = async (
+  const loadDirectory = useCallback(async (
     directoryPath?: string,
   ): Promise<void> => {
     setLoading(true);
@@ -146,9 +147,9 @@ export function RepositoryPicker({
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const openBrowser = (): void => {
+  const openBrowser = useCallback((): void => {
     setIsOpen(true);
 
     /*
@@ -156,16 +157,16 @@ export function RepositoryPicker({
      * the user can return to the configured root.
      */
     void loadDirectory(value.trim() || undefined);
-  };
+  }, [loadDirectory, value]);
 
-  const closeBrowser = (): void => {
+  const closeBrowser = useCallback((): void => {
     if (loading) {
       return;
     }
 
     setIsOpen(false);
     setBrowserError("");
-  };
+  }, [loading]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -191,7 +192,7 @@ export function RepositoryPicker({
         handleKeyDown,
       );
     };
-  }, [isOpen, loading]);
+  }, [closeBrowser, isOpen]);
 
   const breadcrumbs = useMemo<Breadcrumb[]>(() => {
     if (!listing) {
